@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = ["mcp[cli]>=1.2"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -36,6 +37,9 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/SIN-Rotator/SIN-Code-Verification-Oracle"
 Repository = "https://github.com/SIN-Rotator/SIN-Code-Verification-Oracle"
+
+[project.scripts]
+oracle = "sin_code_oracle.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sin_code_oracle"]

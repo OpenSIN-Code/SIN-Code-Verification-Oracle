@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Python **3.11+**
+- Python **3.10+**
 - `pip` (or `uv`/`pipx`)
 - Git (for repository-aware features)
 
@@ -14,7 +14,7 @@ cd SIN-Code-Verification-Oracle
 pip install -e .
 ```
 
-This installs the `oracle` command and the importable package `sin_code_oracle`.
+This installs the `oracle` CLI and the importable package `sin_code_oracle`.
 
 ## Install into an isolated environment
 
