@@ -1,5 +1,6 @@
 # Purpose: Correctness verification using property-based testing with Hypothesis.
 # Docs: correctness.doc.md
+import sys
 import tempfile
 import os
 from pathlib import Path
@@ -69,7 +70,7 @@ def verify_correctness(code: str | None = None, path: str | Path | None = None) 
         test_file = f.name
 
     try:
-        result = run_command(["python", test_file], timeout=30)
+        result = run_command([sys.executable, test_file], timeout=30)
         stdout = result["stdout"]
         stderr = result["stderr"]
         if "HYPOTHESIS_MISSING" in stdout:

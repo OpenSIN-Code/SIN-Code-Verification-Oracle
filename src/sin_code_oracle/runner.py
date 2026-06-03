@@ -1,6 +1,7 @@
 # Purpose: Subprocess runner with isolation and timeout for verification commands.
 # Docs: runner.doc.md
 import subprocess
+import sys
 import tempfile
 import os
 from pathlib import Path
@@ -61,6 +62,6 @@ def run_in_temp_file(code: str, suffix: str = ".py") -> dict[str, Any]:
         f.write(code)
         path = f.name
     try:
-        return run_command(["python", path], cwd=os.path.dirname(path))
+        return run_command([sys.executable, path], cwd=os.path.dirname(path))
     finally:
         os.unlink(path)

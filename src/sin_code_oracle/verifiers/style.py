@@ -44,7 +44,8 @@ def verify_style(code: str | None = None, path: str | Path | None = None) -> Ver
 
         for item in lint_data:
             severity = "low"
-            if item.get("code", "").startswith("E"):
+            code_val = item.get("code") or ""
+            if code_val.startswith("E"):
                 severity = "medium"
             issues.append(
                 Issue(
