@@ -1,6 +1,10 @@
 """SIN-Code-Verification-Oracle — automated verification for code quality.
 
-Docs: README.md
+Re-exports the public API: `VerificationOracle`, `Verdict`, `VerdictStatus`,
+`Issue`. See the module docstrings of `oracle.py` and `verdict.py` for
+detailed usage.
+
+Docs: __init__.doc.md
 """
 
 from .oracle import VerificationOracle

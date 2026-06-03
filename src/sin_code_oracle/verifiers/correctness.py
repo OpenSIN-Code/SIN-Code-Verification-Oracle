@@ -1,5 +1,17 @@
-# Purpose: Correctness verification using property-based testing with Hypothesis.
-# Docs: correctness.doc.md
+"""Correctness verification via property-based testing with Hypothesis.
+
+We synthesize a small test file around the user's code, then run it. The
+generated test file always does:
+  1. A `compile()` of the code (catches syntax errors).
+  2. Property-based smoke tests for two well-known patterns (factorial, sort)
+     — gated by whether the source mentions the relevant name.
+
+Property-based tests catch bugs the obvious unit tests miss: off-by-one in
+factorial, non-idempotent sort, etc. They're not a replacement for real
+test suites, but they're cheap and add a useful safety net.
+
+Docs: correctness.doc.md
+"""
 import sys
 import tempfile
 import os
@@ -10,6 +22,9 @@ from ..verdict import Issue, Verdict, VerdictStatus
 from ..runner import run_command
 
 
+# Sentinel strings in the generated test file. Read by the verifier to
+# decide what passed and what failed. Keep them unique — the verifier
+# searches stdout for them with `in`.
 _CORRECTNESS_TEST_TEMPLATE = '''
 import sys
 import traceback
@@ -23,6 +38,8 @@ except Exception as e:
 {code}
 
 # Auto-generated property-based smoke tests
+# `max_examples=5` keeps the run fast (each test is O(ms)).
+# `deadline=5000` (ms) gives slow CI machines some headroom.
 if 'factorial' in {code!r}:
     @given(st.integers(min_value=0, max_value=20))
     @settings(max_examples=5, deadline=5000)
@@ -48,7 +65,13 @@ print("CORRECTNESS_PASS")
 
 
 def verify_correctness(code: str | None = None, path: str | Path | None = None) -> Verdict:
-    """Run property-based smoke tests or compile check on code."""
+    """Run property-based smoke tests + `compile()` on `code` or `path`.
+
+    Returns:
+        Verdict. `PASS` if all checks ran clean, `WARN` if Hypothesis is
+        missing (compile check still runs), `ERROR` on missing input or
+        I/O failure, `FAIL` if any assertion failed.
+    """
     issues: list[Issue] = []
     source = ""
     if code is not None:
@@ -65,6 +88,8 @@ def verify_correctness(code: str | None = None, path: str | Path | None = None) 
     else:
         return Verdict(status=VerdictStatus.ERROR, issues=[], summary="No target provided")
 
+    # Synthesize a test file that imports Hypothesis, executes the user's
+    # code, and runs the auto-generated property tests.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(_CORRECTNESS_TEST_TEMPLATE.format(code=source))
         test_file = f.name
@@ -74,6 +99,8 @@ def verify_correctness(code: str | None = None, path: str | Path | None = None) 
         stdout = result["stdout"]
         stderr = result["stderr"]
         if "HYPOTHESIS_MISSING" in stdout:
+            # Hypothesis is optional — degrade gracefully, but downgrade
+            # to WARN so the caller knows we didn't run the full check.
             issues.append(
                 Issue(
                     verifier="correctness",
@@ -89,6 +116,8 @@ def verify_correctness(code: str | None = None, path: str | Path | None = None) 
                 summary="Property-based and compile checks passed",
             )
         if stderr:
+            # Truncate to first 500 chars to keep the Issue small; full
+            # stderr is still in the runner's logs.
             issues.append(
                 Issue(
                     verifier="correctness",

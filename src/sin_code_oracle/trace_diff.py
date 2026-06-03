@@ -11,6 +11,8 @@ caught here even when line-diffs and type-checks are clean.
 
 Determinism helpers: the trace normalizes common sources of noise (timestamps,
 temp paths, memory addresses, uuids) so diffs reflect semantics, not entropy.
+
+Docs: trace_diff.doc.md
 """
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ from pathlib import Path
 
 
 # Patterns that introduce non-determinism and would create false-positive diffs.
+# Each is a (regex, replacement) pair; everything that matches becomes a
+# stable token, so equivalent runs of the same command produce the same trace.
 _NOISE_PATTERNS = [
     (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"), "<TIMESTAMP>"),
     (re.compile(r"0x[0-9a-fA-F]+"), "<ADDR>"),
@@ -33,14 +37,19 @@ _NOISE_PATTERNS = [
 ]
 
 
+# ── Helpers ────────────────────────────────────────────────────────────
 def _normalize(text: str) -> str:
+    """Replace non-deterministic tokens (timestamps, UUIDs, etc.) with stable placeholders."""
     for pattern, repl in _NOISE_PATTERNS:
         text = pattern.sub(repl, text)
     return text.strip()
 
 
+# ── Data models ────────────────────────────────────────────────────────
 @dataclass
 class BehaviorTrace:
+    """Snapshot of a command's observable behavior at a point in time."""
+
     command: str
     exit_code: int
     stdout_normalized: str
@@ -50,6 +59,11 @@ class BehaviorTrace:
 
     @property
     def fingerprint(self) -> str:
+        """Stable 16-char hash of exit_code + normalized stdout + events + artifacts.
+
+        Two traces with the same fingerprint describe semantically identical
+        runs. Use this as a fast equality check before doing a full diff.
+        """
         payload = json.dumps(
             {
                 "exit": self.exit_code,
@@ -62,6 +76,7 @@ class BehaviorTrace:
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     def as_dict(self) -> dict:
+        """Return a JSON-serializable view including the fingerprint."""
         return {
             "command": self.command,
             "exit_code": self.exit_code,
@@ -73,6 +88,8 @@ class BehaviorTrace:
 
 @dataclass
 class TraceDelta:
+    """Result of comparing two BehaviorTrace instances."""
+
     changed: bool
     exit_code_changed: bool
     stdout_changed: bool
@@ -81,13 +98,18 @@ class TraceDelta:
     summary: str
 
     def as_dict(self) -> dict:
+        """Return a JSON-serializable view of this delta."""
         return self.__dict__
 
 
+# ── Differ ─────────────────────────────────────────────────────────────
 class TraceDiffer:
+    """Capture and diff behavior traces of arbitrary shell commands."""
+
     def __init__(self, root: str = ".", artifact_globs: list[str] | None = None):
         self.root = str(Path(root).resolve())
         # Files whose content we hash to detect emitted-output changes.
+        # e.g. ["**/*.html", "dist/**/*.js"] will pick up build artifacts.
         self.artifact_globs = artifact_globs or []
 
     def capture(
@@ -98,9 +120,15 @@ class TraceDiffer:
     ) -> BehaviorTrace:
         """Run `command` and snapshot its observable behavior.
 
-        events_file: optional path the program writes JSON lines to; each line
-        is parsed as a structured event and included in the trace (lets you
-        capture domain-level behavior, not just stdout).
+        Args:
+            command: Shell command to run (e.g. `"python -m myapp"`).
+            events_file: Optional path the program writes JSON lines to; each
+                line is parsed as a structured event and included in the trace.
+                This lets you capture domain-level behavior, not just stdout.
+            timeout: Seconds before declaring the run timed out (exit 124).
+
+        Returns:
+            BehaviorTrace with normalized stdout, parsed events, and content-hashed artifacts.
         """
         try:
             proc = subprocess.run(
@@ -109,6 +137,7 @@ class TraceDiffer:
             )
             exit_code, raw = proc.returncode, proc.stdout
         except subprocess.TimeoutExpired:
+            # Use the same exit code (124) as ExecutionOracle for consistency.
             exit_code, raw = 124, ""
 
         events: list[dict] = []
@@ -122,6 +151,8 @@ class TraceDiffer:
                     try:
                         events.append(json.loads(line))
                     except json.JSONDecodeError:
+                        # Lines that aren't valid JSON still get into the
+                        # trace (normalized) so the diff reflects their presence.
                         events.append({"raw": _normalize(line)})
 
         artifacts: dict[str, str] = {}
@@ -129,6 +160,8 @@ class TraceDiffer:
             for p in Path(self.root).glob(glob):
                 if p.is_file():
                     rel = str(p.relative_to(self.root))
+                    # 16-char content hash is enough to detect changes without
+                    # storing the full file. Collisions are astronomically rare.
                     artifacts[rel] = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
 
         return BehaviorTrace(
@@ -141,6 +174,11 @@ class TraceDiffer:
         )
 
     def diff(self, before: BehaviorTrace, after: BehaviorTrace) -> TraceDelta:
+        """Compute a structured delta between two traces.
+
+        The delta covers four orthogonal dimensions: exit code, stdout,
+        on-disk artifacts, and structured events. `changed` is the OR-fold.
+        """
         exit_changed = before.exit_code != after.exit_code
         stdout_changed = before.stdout_normalized != after.stdout_normalized
 
@@ -156,6 +194,7 @@ class TraceDiffer:
 
         event_changes = self._diff_events(before.events, after.events)
 
+        # OR-fold: any dimension changed ⇒ the trace as a whole changed.
         changed = bool(exit_changed or stdout_changed or artifact_changes or event_changes)
         parts = []
         if exit_changed:
@@ -179,7 +218,11 @@ class TraceDiffer:
 
     @staticmethod
     def _diff_events(before: list[dict], after: list[dict]) -> list[dict]:
-        """Multiset diff of structured events keyed by their JSON content."""
+        """Multiset diff of structured events keyed by their JSON content.
+
+        Returns entries like `{"type": "emitted", "count": N, "event": {...}}`
+        for events present in `after` but not `before`, and vice versa.
+        """
         def key(e: dict) -> str:
             return json.dumps(e, sort_keys=True)
 

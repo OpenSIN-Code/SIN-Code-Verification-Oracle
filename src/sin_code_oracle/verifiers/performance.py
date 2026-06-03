@@ -1,5 +1,15 @@
-# Purpose: Performance verification: detect O(n²) loops, large allocations, missing memoization.
-# Docs: performance.doc.md
+"""Performance verification — AST heuristics for common anti-patterns.
+
+We don't run a profiler here; instead we scan the AST for three patterns
+that almost always indicate a perf bug:
+  1. Nested loops (O(n²) or worse)
+  2. Large literal allocations (`[...] * 1_000_000` and friends)
+  3. Recursive functions without memoization
+
+Heuristics, not ground truth — false positives are possible and expected.
+
+Docs: performance.doc.md
+"""
 import ast
 import re
 from pathlib import Path
@@ -8,8 +18,14 @@ from typing import Any
 from ..verdict import Issue, Verdict, VerdictStatus
 
 
+# ── Heuristics ─────────────────────────────────────────────────────────
 def _has_nested_loop(node: ast.AST) -> bool:
-    """Check if an AST node contains a nested loop."""
+    """True if `node` contains any For/While with another For/While inside it.
+
+    Walks the subtree twice: first for outer loops, then for inner loops
+    under each outer. We explicitly compare identities (`is not outer`) so
+    a single-statement loop is not flagged as self-nested.
+    """
     for outer in ast.walk(node):
         if isinstance(outer, (ast.For, ast.While)):
             for inner in ast.walk(outer):
@@ -19,7 +35,13 @@ def _has_nested_loop(node: ast.AST) -> bool:
 
 
 def _detect_large_allocations(source: str) -> list[Issue]:
-    """Detect large literal list/dict/set allocations."""
+    """Flag `[...]*100000`-style repeated list allocations.
+
+    The 5-digit threshold (`\\d{5,}`) is conservative — it's unlikely to
+    fire on a legitimate 100-element default. False positives are possible
+    for code that intentionally builds huge test fixtures; tune the
+    threshold if that becomes a problem.
+    """
     issues = []
     pattern = re.compile(r"\[\s*.*\s*\]\s*\*\s*(\d{5,})")
     for i, line in enumerate(source.splitlines(), 1):
@@ -38,18 +60,27 @@ def _detect_large_allocations(source: str) -> list[Issue]:
 
 
 class _RecursiveCallFinder(ast.NodeVisitor):
+    """Tiny NodeVisitor that records whether a function calls itself by name."""
+
     def __init__(self, name: str):
         self.name = name
         self.found = False
 
     def visit_Call(self, node: ast.Call):
+        # Only direct self-calls (a.foo() does not count as recursion).
         if isinstance(node.func, ast.Name) and node.func.id == self.name:
             self.found = True
+        # generic_visit keeps us descending into nested expressions.
         self.generic_visit(node)
 
 
 def _detect_missing_memoization(source: str) -> list[Issue]:
-    """Heuristic: recursive function without functools.lru_cache or explicit memo."""
+    """Heuristic: recursive function without `lru_cache` or explicit `memo`/`cache`.
+
+    Returns an Issue per such function. False positives: functions that
+    recurse on a strictly-decreasing argument and don't need memoization.
+    The severity is `low` precisely because of this — it's a hint, not a bug.
+    """
     issues = []
     try:
         tree = ast.parse(source)
@@ -58,6 +89,10 @@ def _detect_missing_memoization(source: str) -> list[Issue]:
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
             name = node.name
+            # ast.dump produces a stable string representation; checking
+            # for "lru_cache" / "memo" / "cache" in it is a quick proxy for
+            # "does the body mention memoization". False positives are possible
+            # (e.g. a `cache = {}` local variable) but rare in practice.
             body_str = ast.dump(node, annotate_fields=False)
             finder = _RecursiveCallFinder(name)
             for stmt in node.body:
@@ -78,8 +113,14 @@ def _detect_missing_memoization(source: str) -> list[Issue]:
     return issues
 
 
+# ── Verifier ───────────────────────────────────────────────────────────
 def verify_performance(code: str | None = None, path: str | Path | None = None) -> Verdict:
-    """Scan code for common performance anti-patterns."""
+    """Scan code or path for nested loops, large allocations, and missing memoization.
+
+    Returns a Verdict. An `ERROR` verdict is returned for missing input or
+    unrecoverable I/O failure; a `SyntaxError` in the source is also an ERROR
+    (we can't AST-walk broken code).
+    """
     issues: list[Issue] = []
     source = ""
     if code is not None:
@@ -105,6 +146,9 @@ def verify_performance(code: str | None = None, path: str | Path | None = None) 
             summary="Syntax error in source; performance check skipped",
         )
 
+    # Walk the AST and check each loop for nesting. The duplicate
+    # `_has_nested_loop` walk inside the outer walk is O(n²) but `n` here
+    # is the number of top-level statements, so it stays cheap.
     for node in ast.walk(tree):
         if isinstance(node, (ast.For, ast.While)):
             if _has_nested_loop(node):

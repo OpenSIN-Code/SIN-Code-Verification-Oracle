@@ -4,6 +4,8 @@ The single most valuable tool here is `verify_change`: an agent calls it before
 declaring a task done, and gets back a Verdict grounded in reality rather than
 its own optimism. `confidence` and `verified` let the agent know how much to
 trust the answer.
+
+Docs: mcp_server.doc.md
 """
 from __future__ import annotations
 
@@ -12,6 +14,8 @@ import json
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:  # pragma: no cover
+    # The `mcp` extra is optional — the rest of the package works without it.
+    # `main()` raises a clear error if you actually try to serve.
     FastMCP = None
 
 from .diagnostics import DiagnosticsOracle
@@ -19,6 +23,11 @@ from .oracle import VerificationOracle
 
 
 def main():
+    """Start the MCP server over stdio (blocking).
+
+    Raises:
+        RuntimeError: if the `mcp` extra is not installed.
+    """
     if FastMCP is None:
         raise RuntimeError("mcp package not installed. Install with: pip install 'sin-code-oracle[mcp]'")
 

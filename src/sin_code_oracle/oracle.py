@@ -1,5 +1,13 @@
-# Purpose: Main VerificationOracle class that orchestrates all verifiers.
-# Docs: oracle.doc.md
+"""Main VerificationOracle — orchestrates all verifiers.
+
+The oracle is the public face of the package: callers (CLI, MCP server, agent
+loops) construct a `VerificationOracle` and call `verify()` / `verify_file()` /
+`verify_directory()`. Internally it fans out to the five verifier modules
+(security, performance, correctness, style, tests) and merges their verdicts
+into a single `Verdict` with the worst-case status.
+
+Docs: oracle.doc.md
+"""
 import tempfile
 import os
 from pathlib import Path
@@ -10,8 +18,14 @@ from .report import merge_verdicts
 from .verifiers import verify_security, verify_performance, verify_correctness, verify_style, verify_tests
 
 
+# ── Orchestrator ───────────────────────────────────────────────────────
 class VerificationOracle:
-    """Orchestrate security, performance, correctness, style, and test verification."""
+    """Orchestrate security, performance, correctness, style, and test verification.
+
+    All three `verify_*` methods return structured `Verdict` objects — see
+    `verdict.py` for the data model. Failures in any one verifier do NOT
+    short-circuit the others; the final verdict is the worst-case across all.
+    """
 
     def __init__(self, workspace: str | Path = "."):
         self.workspace = Path(workspace).resolve()
@@ -25,7 +39,18 @@ class VerificationOracle:
     ) -> Verdict:
         """Run the full verification suite.
 
-        Returns a Verdict with status (PASS/FAIL/WARN), issues, summary, and diagnostics.
+        Args:
+            code: Optional Python source string. If provided, a temporary file
+                  is created in `workspace` and all file-based verifiers run on it.
+            language: Currently only "python" is fully supported; other languages
+                      return a WARN Verdict with limited checks.
+            test_command: Optional test command (e.g. "pytest -x"). If None and
+                          `code` is provided, no test verifier runs.
+            run_diagnostics: When False, the merged verdict's `diagnostics` dict
+                             is stripped before returning.
+
+        Returns:
+            Verdict with status (PASS/FAIL/WARN/ERROR), issues, summary, and diagnostics.
         """
         if language != "python":
             return Verdict(
@@ -37,18 +62,20 @@ class VerificationOracle:
         verdicts: list[Verdict] = []
         temp_path = None
         if code is not None:
+            # Tempfile lives in `workspace` so relative paths inside the code
+            # (and in tool output) match the context the agent was working in.
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=self.workspace) as f:
                 f.write(code)
                 temp_path = f.name
 
         try:
-            # Security
+            # ── Security ──
             if code is not None:
                 verdicts.append(verify_security(code=code))
             else:
                 verdicts.append(verify_security(path=self.workspace))
 
-            # Performance
+            # ── Performance ──
             if code is not None:
                 verdicts.append(verify_performance(code=code))
             elif temp_path:
@@ -56,7 +83,7 @@ class VerificationOracle:
             else:
                 verdicts.append(verify_performance(path=self.workspace))
 
-            # Correctness
+            # ── Correctness ──
             if code is not None:
                 verdicts.append(verify_correctness(code=code))
             elif temp_path:
@@ -64,7 +91,7 @@ class VerificationOracle:
             else:
                 verdicts.append(verify_correctness(path=self.workspace))
 
-            # Style
+            # ── Style ──
             if code is not None:
                 verdicts.append(verify_style(code=code))
             elif temp_path:
@@ -72,7 +99,7 @@ class VerificationOracle:
             else:
                 verdicts.append(verify_style(path=self.workspace))
 
-            # Tests
+            # ── Tests ──
             if test_command is not None:
                 verdicts.append(verify_tests(test_command=test_command, cwd=self.workspace))
             elif code is not None:
@@ -87,16 +114,23 @@ class VerificationOracle:
             else:
                 verdicts.append(verify_tests(cwd=self.workspace))
         finally:
+            # Always clean up the temp file, even if a verifier crashed.
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
 
         merged = merge_verdicts(verdicts)
         if not run_diagnostics:
+            # Diagnostics can be large (full bandit/ruff output); strip them
+            # when the caller only wants the pass/fail signal.
             merged.diagnostics = {}
         return merged
 
+    # ── Single-file / whole-directory convenience wrappers ─────────────
     def verify_file(self, path: str) -> Verdict:
-        """Verify a single file."""
+        """Run security, performance, correctness, and style on a single file.
+
+        Skips the test verifier (no test runner makes sense for one file).
+        """
         target = Path(path).resolve()
         if not target.exists():
             return Verdict(
@@ -113,7 +147,11 @@ class VerificationOracle:
         return merge_verdicts(verdicts)
 
     def verify_directory(self, path: str) -> list[Verdict]:
-        """Verify all Python files in a directory."""
+        """Verify every `.py` file under `path` (recursive).
+
+        Returns a list of Verdicts — one per file. Files are processed
+        sequentially; there is no cross-file analysis yet.
+        """
         target = Path(path).resolve()
         if not target.is_dir():
             return [
